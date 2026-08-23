@@ -48,6 +48,27 @@ html, body {
 <script>
 'use strict';
 
+// Fail loud, not black: turn any startup error into a readable on-screen message
+// instead of a silent black screen — essential for diagnosing on real devices.
+function showFatalError(msg) {
+  try {
+    var el = document.getElementById('fatalErr');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'fatalErr';
+      el.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#14082a;color:#ff9ee6;font:4vw/1.5 monospace;padding:6vw;overflow:auto;white-space:pre-wrap;box-sizing:border-box';
+      (document.body || document.documentElement).appendChild(el);
+    }
+    el.textContent = 'The Magical World of Ben hit an error:\n\n' + msg + '\n\n(screenshot this and send it over)';
+  } catch (e) {}
+}
+window.addEventListener('error', function (e) {
+  showFatalError((e.message || 'error') + '\n' + ((e.filename || '') + ':' + (e.lineno || 0)));
+});
+window.addEventListener('unhandledrejection', function (e) {
+  showFatalError('promise: ' + ((e.reason && e.reason.message) || e.reason || 'rejection'));
+});
+
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 const overlay = document.getElementById('overlay');
@@ -62,7 +83,9 @@ let W, H, RW, RH;
 let zBuffer = new Float32Array(1024);
 
 function resize() {
-  const nw = window.innerWidth, nh = window.innerHeight;
+  const nw = window.innerWidth || document.documentElement.clientWidth || 0;
+  const nh = window.innerHeight || document.documentElement.clientHeight || 0;
+  if (!nw || !nh) return; // never size to 0x0 (WebView can report 0 at first paint)
   if (nw === W && nh === H && canvas.width === Math.floor(nw * RENDER_SCALE)) return;
   W = nw;
   H = nh;
@@ -1942,11 +1965,20 @@ function gameLoop(timestamp) {
   let dt = (timestamp - lastTime) / 1000;
   lastTime = timestamp;
   if (dt > 0.05) dt = 0.05;
+  // Self-heal sizing every frame. On Android's immersive-fullscreen WebView the
+  // window can report 0 (or wrong) dimensions at first paint; resize() is
+  // idempotent (no reallocation unless the size actually changed), so this is
+  // cheap and guarantees the canvas never stays stuck at 0x0 -> black screen.
+  resize();
   update(dt);
   render();
   requestAnimationFrame(gameLoop);
 }
 requestAnimationFrame(gameLoop);
+// Extra late re-measures to catch WebView layout settling after load.
+window.addEventListener('load', resize);
+setTimeout(resize, 250);
+setTimeout(resize, 1000);
 </script>
 </body>
 </html>
