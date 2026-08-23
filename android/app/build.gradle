@@ -6,7 +6,7 @@ android {
 
     defaultConfig {
         applicationId "com.magicalworld.ben"
-        minSdk 26
+        minSdk 24
         targetSdk 34
         versionCode 1
         versionName "1.0"
@@ -29,6 +29,7 @@ android {
 }
 
 dependencies {
-    implementation 'androidx.appcompat:appcompat:1.6.1'
-    implementation 'androidx.webkit:webkit:1.8.0'
+    // Intentionally no androidx dependencies: this is a bare framework WebView
+    // Activity, so there are no AppCompat/emoji2/startup initializer providers to
+    // run (or fail) at launch. Keeps the app tiny and the startup path minimal.
 }
