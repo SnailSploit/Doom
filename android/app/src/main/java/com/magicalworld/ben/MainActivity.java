@@ -25,6 +25,11 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Draw into the display cutout (notch) area so landscape has no black bars.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            getWindow().getAttributes().layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        }
         hideSystemUI();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 

@@ -13,7 +13,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode|density|navigation"
             android:screenOrientation="landscape"
             android:theme="@style/Theme.MagicalWorld.Fullscreen">
             <intent-filter>
