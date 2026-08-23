@@ -1,0 +1,1501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
+<title>HELLFIRE - Mobile Doom-Inspired FPS</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  background: #000;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  position: fixed;
+}
+#gameCanvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+#overlay {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  z-index: 10; pointer-events: auto;
+}
+#overlay.hidden { display: none; pointer-events: none; }
+.title-text {
+  font-family: 'Courier New', monospace;
+  color: #ff3300;
+  text-shadow: 0 0 20px #ff0000, 0 0 40px #aa0000;
+  text-align: center;
+}
+.title-text h1 { font-size: 12vw; letter-spacing: 8px; margin-bottom: 10px; }
+.title-text h2 { font-size: 4vw; color: #cc6600; margin-bottom: 30px; }
+.title-text p { font-size: 3.5vw; color: #888; margin-top: 20px; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100%{opacity:0.4} 50%{opacity:1} }
+.game-over-text h1 { font-size: 10vw; color: #ff0000; }
+.game-over-text p { font-size: 4vw; color: #aa0000; margin-top: 20px; }
+.level-text h1 { font-size: 8vw; color: #ffaa00; }
+.level-text p { font-size: 4vw; color: #888; margin-top: 10px; }
+.win-text h1 { font-size: 8vw; color: #00ff66; }
+.win-text p { font-size: 4vw; color: #66ffaa; margin-top: 10px; }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<div id="overlay">
+  <div class="title-text" id="overlayContent">
+    <h1>HELLFIRE</h1>
+    <h2>Descent into Darkness</h2>
+    <p>TAP TO BEGIN</p>
+  </div>
+</div>
+<script>
+'use strict';
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const overlay = document.getElementById('overlay');
+const overlayContent = document.getElementById('overlayContent');
+
+const RENDER_SCALE = 0.4;
+let W, H, RW, RH;
+let offscreen, offCtx;
+
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  RW = Math.floor(W * RENDER_SCALE);
+  RH = Math.floor(H * RENDER_SCALE);
+  canvas.width = RW;
+  canvas.height = RH;
+}
+resize();
+window.addEventListener('resize', resize);
+
+const TWO_PI = Math.PI * 2;
+const HALF_PI = Math.PI / 2;
+
+const sinTable = new Float32Array(3600);
+const cosTable = new Float32Array(3600);
+for (let i = 0; i < 3600; i++) {
+  const a = (i / 3600) * TWO_PI;
+  sinTable[i] = Math.sin(a);
+  cosTable[i] = Math.cos(a);
+}
+function fastSin(a) {
+  let idx = ((a % TWO_PI + TWO_PI) % TWO_PI) / TWO_PI * 3600;
+  return sinTable[Math.floor(idx) % 3600];
+}
+function fastCos(a) {
+  let idx = ((a % TWO_PI + TWO_PI) % TWO_PI) / TWO_PI * 3600;
+  return cosTable[Math.floor(idx) % 3600];
+}
+
+const STATES = { TITLE: 0, PLAYING: 1, LEVEL_COMPLETE: 2, GAME_OVER: 3, WIN: 4 };
+let gameState = STATES.TITLE;
+let stateTimer = 0;
+let currentLevel = 0;
+let kills = 0;
+let totalKills = 0;
+let levelStartTime = 0;
+
+const WALL_COLORS = [
+  null,
+  { main: '#8B0000', dark: '#5C0000', light: '#AA2222' },
+  { main: '#555555', dark: '#333333', light: '#777777' },
+  { main: '#2B1B0E', dark: '#1A1008', light: '#4A3020' },
+  { main: '#1A3A1A', dark: '#0D1F0D', light: '#2D5A2D' },
+  { main: '#3B1A5A', dark: '#220D3A', light: '#5A2D8A' },
+  { main: '#5A3A1A', dark: '#3A220D', light: '#7A5A3A' },
+];
+
+const DOOR_COLOR = { main: '#8B8000', dark: '#5C5500', light: '#BBAA22' };
+
+const LEVELS = [
+  {
+    name: "ENTRYWAY",
+    grid: [
+      [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+      [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+      [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+      [1,0,0,2,2,2,0,0,0,0,2,2,2,0,0,1],
+      [1,0,0,2,0,0,0,0,0,0,0,0,2,0,0,1],
+      [1,0,0,2,0,0,0,0,0,0,0,0,2,0,0,1],
+      [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+      [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+      [1,1,1,1,0,0,0,0,0,0,0,0,1,1,1,1],
+      [3,3,3,1,0,0,0,0,0,0,0,0,1,3,3,3],
+      [3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3],
+      [3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3],
+      [3,0,0,0,0,0,3,3,3,3,0,0,0,0,0,3],
+      [3,0,0,0,0,0,3,0,0,3,0,0,0,0,0,3],
+      [3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3],
+      [3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],
+    ],
+    playerStart: { x: 2.5, y: 2.5, angle: 0 },
+    enemies: [
+      { x: 7.5, y: 6.5, type: 'imp' },
+      { x: 10.5, y: 4.5, type: 'imp' },
+      { x: 4.5, y: 11.5, type: 'imp' },
+      { x: 12.5, y: 11.5, type: 'imp' },
+      { x: 7.5, y: 13.5, type: 'demon' },
+    ],
+    pickups: [
+      { x: 5.5, y: 1.5, type: 'shotgun' },
+      { x: 14.5, y: 14.5, type: 'health' },
+      { x: 1.5, y: 14.5, type: 'ammo_shells' },
+      { x: 7.5, y: 10.5, type: 'armor' },
+    ],
+    exit: { x: 7, y: 14 },
+  },
+  {
+    name: "THE TUNNELS",
+    grid: [
+      [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],
+      [2,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,2],
+      [2,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,2],
+      [2,0,0,0,0,0,0,4,4,4,4,0,0,0,0,0,0,2],
+      [2,0,0,0,2,0,0,4,0,0,4,0,0,4,4,4,0,2],
+      [2,2,2,0,2,0,0,4,0,0,4,0,0,4,0,0,0,2],
+      [2,0,0,0,2,0,0,0,0,0,0,0,0,4,0,0,0,2],
+      [2,0,0,0,2,2,2,0,0,0,0,2,2,4,0,0,0,2],
+      [2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2],
+      [2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2],
+      [2,4,4,0,0,0,2,2,2,2,2,2,0,0,0,4,4,2],
+      [2,0,0,0,0,0,2,0,0,0,0,2,0,0,0,0,0,2],
+      [2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2],
+      [2,0,0,0,0,0,2,0,0,0,0,2,0,0,0,0,0,2],
+      [2,0,0,0,0,0,2,2,0,0,2,2,0,0,0,0,0,2],
+      [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],
+    ],
+    playerStart: { x: 1.5, y: 1.5, angle: 0 },
+    enemies: [
+      { x: 8.5, y: 4.5, type: 'imp' },
+      { x: 14.5, y: 5.5, type: 'imp' },
+      { x: 1.5, y: 6.5, type: 'imp' },
+      { x: 8.5, y: 8.5, type: 'demon' },
+      { x: 3.5, y: 12.5, type: 'demon' },
+      { x: 14.5, y: 12.5, type: 'imp' },
+      { x: 8.5, y: 12.5, type: 'cacodemon' },
+    ],
+    pickups: [
+      { x: 3.5, y: 1.5, type: 'ammo_bullets' },
+      { x: 8.5, y: 1.5, type: 'health' },
+      { x: 14.5, y: 1.5, type: 'plasma' },
+      { x: 1.5, y: 8.5, type: 'ammo_shells' },
+      { x: 16.5, y: 8.5, type: 'health' },
+      { x: 8.5, y: 11.5, type: 'armor' },
+      { x: 1.5, y: 14.5, type: 'ammo_cells' },
+    ],
+    exit: { x: 8, y: 13 },
+  },
+  {
+    name: "HELLGATE",
+    grid: [
+      [5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5],
+      [5,0,0,0,0,0,5,0,0,0,0,0,0,5,0,0,0,0,0,5],
+      [5,0,0,0,0,0,5,0,0,0,0,0,0,5,0,0,0,0,0,5],
+      [5,0,0,0,0,0,0,0,0,5,5,0,0,0,0,0,0,0,0,5],
+      [5,0,0,0,0,0,5,0,0,5,5,0,0,5,0,0,0,0,0,5],
+      [5,0,0,0,0,0,5,0,0,0,0,0,0,5,0,0,0,0,0,5],
+      [5,5,5,0,0,5,5,0,0,0,0,0,0,5,5,0,0,5,5,5],
+      [5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5],
+      [5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5],
+      [5,0,0,0,6,6,0,0,0,1,1,0,0,0,6,6,0,0,0,5],
+      [5,0,0,0,6,6,0,0,0,1,1,0,0,0,6,6,0,0,0,5],
+      [5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5],
+      [5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5],
+      [5,5,5,0,0,5,5,0,0,0,0,0,0,5,5,0,0,5,5,5],
+      [5,0,0,0,0,0,5,0,0,0,0,0,0,5,0,0,0,0,0,5],
+      [5,0,0,0,0,0,5,0,0,0,0,0,0,5,0,0,0,0,0,5],
+      [5,0,0,0,0,0,0,0,0,5,5,0,0,0,0,0,0,0,0,5],
+      [5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5],
+      [5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5],
+      [5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5],
+    ],
+    playerStart: { x: 1.5, y: 1.5, angle: Math.PI / 4 },
+    enemies: [
+      { x: 1.5, y: 5.5, type: 'imp' },
+      { x: 4.5, y: 1.5, type: 'imp' },
+      { x: 17.5, y: 2.5, type: 'imp' },
+      { x: 17.5, y: 5.5, type: 'demon' },
+      { x: 9.5, y: 7.5, type: 'cacodemon' },
+      { x: 1.5, y: 11.5, type: 'demon' },
+      { x: 18.5, y: 11.5, type: 'demon' },
+      { x: 7.5, y: 14.5, type: 'imp' },
+      { x: 12.5, y: 14.5, type: 'imp' },
+      { x: 2.5, y: 17.5, type: 'cacodemon' },
+      { x: 17.5, y: 17.5, type: 'cacodemon' },
+      { x: 9.5, y: 17.5, type: 'baron' },
+    ],
+    pickups: [
+      { x: 8.5, y: 1.5, type: 'health' },
+      { x: 11.5, y: 1.5, type: 'health' },
+      { x: 1.5, y: 8.5, type: 'ammo_shells' },
+      { x: 18.5, y: 8.5, type: 'ammo_cells' },
+      { x: 9.5, y: 5.5, type: 'armor' },
+      { x: 9.5, y: 12.5, type: 'health' },
+      { x: 5.5, y: 17.5, type: 'ammo_shells' },
+      { x: 14.5, y: 17.5, type: 'ammo_cells' },
+      { x: 9.5, y: 9.5, type: 'megahealth' },
+    ],
+    exit: { x: 9, y: 18 },
+  },
+];
+
+const ENEMY_TYPES = {
+  imp: {
+    name: 'Imp',
+    health: 60,
+    speed: 1.8,
+    damage: 8,
+    attackRange: 8,
+    attackCooldown: 1.2,
+    color: '#AA4400',
+    eyeColor: '#FFFF00',
+    size: 0.5,
+    score: 100,
+    melee: false,
+  },
+  demon: {
+    name: 'Demon',
+    health: 120,
+    speed: 2.5,
+    damage: 15,
+    attackRange: 1.5,
+    attackCooldown: 0.8,
+    color: '#884422',
+    eyeColor: '#FF0000',
+    size: 0.6,
+    score: 150,
+    melee: true,
+  },
+  cacodemon: {
+    name: 'Cacodemon',
+    health: 200,
+    speed: 1.5,
+    damage: 12,
+    attackRange: 10,
+    attackCooldown: 1.5,
+    color: '#CC2200',
+    eyeColor: '#00FF00',
+    size: 0.7,
+    score: 250,
+    melee: false,
+  },
+  baron: {
+    name: 'Baron of Hell',
+    health: 500,
+    speed: 1.2,
+    damage: 25,
+    attackRange: 10,
+    attackCooldown: 2.0,
+    color: '#44AA44',
+    eyeColor: '#FF4400',
+    size: 0.8,
+    score: 500,
+    melee: false,
+  },
+};
+
+const WEAPONS = [
+  { name: 'Pistol', damage: 15, spread: 0.02, ammoType: 'bullets', ammoPerShot: 1, fireRate: 0.35, color: '#AAAAAA', projectileColor: '#FFFF00' },
+  { name: 'Shotgun', damage: 10, pellets: 5, spread: 0.08, ammoType: 'shells', ammoPerShot: 1, fireRate: 0.7, color: '#886644', projectileColor: '#FFAA00' },
+  { name: 'Plasma Gun', damage: 25, spread: 0.01, ammoType: 'cells', ammoPerShot: 1, fireRate: 0.15, color: '#4444FF', projectileColor: '#00AAFF' },
+];
+
+let player = {};
+let enemies = [];
+let pickups = [];
+let projectiles = [];
+let particles = [];
+let damageFlash = 0;
+let pickupFlash = 0;
+let weaponBob = 0;
+let weaponKick = 0;
+let muzzleFlash = 0;
+let screenShake = 0;
+
+function initPlayer() {
+  const lvl = LEVELS[currentLevel];
+  player = {
+    x: lvl.playerStart.x,
+    y: lvl.playerStart.y,
+    angle: lvl.playerStart.angle,
+    health: player.health || 100,
+    armor: player.armor || 0,
+    ammo: player.ammo || { bullets: 50, shells: 0, cells: 0 },
+    weapons: player.weapons || [true, false, false],
+    currentWeapon: player.currentWeapon || 0,
+    fireTimer: 0,
+    speed: 3.0,
+    rotSpeed: 2.5,
+  };
+}
+
+function initLevel() {
+  const lvl = LEVELS[currentLevel];
+  enemies = lvl.enemies.map(e => ({
+    x: e.x, y: e.y,
+    type: e.type,
+    ...ENEMY_TYPES[e.type],
+    health: ENEMY_TYPES[e.type].health,
+    state: 'idle',
+    stateTimer: 0,
+    attackTimer: ENEMY_TYPES[e.type].attackCooldown,
+    painTimer: 0,
+    deathTimer: 0,
+    alertTimer: 0,
+    velX: 0, velY: 0,
+    active: true,
+  }));
+  pickups = lvl.pickups.map(p => ({
+    x: p.x, y: p.y, type: p.type, active: true, bobPhase: Math.random() * TWO_PI,
+  }));
+  projectiles = [];
+  particles = [];
+  kills = 0;
+  totalKills = enemies.length;
+  levelStartTime = performance.now();
+}
+
+function resetGame() {
+  currentLevel = 0;
+  player = {};
+  player.health = 100;
+  player.armor = 0;
+  player.ammo = { bullets: 50, shells: 0, cells: 0 };
+  player.weapons = [true, false, false];
+  player.currentWeapon = 0;
+  initPlayer();
+  initLevel();
+}
+
+const zBuffer = new Float32Array(1024);
+
+const FOV = Math.PI / 3;
+
+function castRay(ox, oy, angle) {
+  const sin = Math.sin(angle);
+  const cos = Math.cos(angle);
+  const grid = LEVELS[currentLevel].grid;
+  const mapH = grid.length;
+  const mapW = grid[0].length;
+
+  let mapX = Math.floor(ox);
+  let mapY = Math.floor(oy);
+
+  const deltaDistX = Math.abs(1 / (cos || 1e-10));
+  const deltaDistY = Math.abs(1 / (sin || 1e-10));
+
+  let stepX, stepY;
+  let sideDistX, sideDistY;
+
+  if (cos < 0) { stepX = -1; sideDistX = (ox - mapX) * deltaDistX; }
+  else { stepX = 1; sideDistX = (mapX + 1 - ox) * deltaDistX; }
+
+  if (sin < 0) { stepY = -1; sideDistY = (oy - mapY) * deltaDistY; }
+  else { stepY = 1; sideDistY = (mapY + 1 - oy) * deltaDistY; }
+
+  let side = 0;
+  let dist = 0;
+  let hit = 0;
+
+  for (let i = 0; i < 64; i++) {
+    if (sideDistX < sideDistY) {
+      sideDistX += deltaDistX;
+      mapX += stepX;
+      side = 0;
+    } else {
+      sideDistY += deltaDistY;
+      mapY += stepY;
+      side = 1;
+    }
+
+    if (mapX < 0 || mapX >= mapW || mapY < 0 || mapY >= mapH) break;
+
+    if (grid[mapY][mapX] > 0) {
+      hit = grid[mapY][mapX];
+      break;
+    }
+  }
+
+  if (hit) {
+    if (side === 0) dist = sideDistX - deltaDistX;
+    else dist = sideDistY - deltaDistY;
+  } else {
+    dist = 64;
+  }
+
+  let wallX;
+  if (side === 0) wallX = oy + dist * sin;
+  else wallX = ox + dist * cos;
+  wallX -= Math.floor(wallX);
+
+  return { dist, side, hit, wallX, mapX, mapY };
+}
+
+function isWall(x, y) {
+  const grid = LEVELS[currentLevel].grid;
+  const gx = Math.floor(x);
+  const gy = Math.floor(y);
+  if (gx < 0 || gx >= grid[0].length || gy < 0 || gy >= grid.length) return true;
+  return grid[gy][gx] > 0;
+}
+
+function canSee(x1, y1, x2, y2) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  const steps = Math.ceil(dist * 4);
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    if (isWall(x1 + dx * t, y1 + dy * t)) return false;
+  }
+  return true;
+}
+
+let touchL = null;
+let touchR = null;
+let touchLStart = { x: 0, y: 0 };
+let touchRStart = { x: 0, y: 0 };
+let touchRPrev = { x: 0, y: 0 };
+let moveInput = { x: 0, y: 0 };
+let lookDelta = 0;
+let shootRequested = false;
+let touchRMoved = false;
+
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+function handleTouchStart(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.clientX < W * 0.4) {
+      touchL = t.identifier;
+      touchLStart = { x: t.clientX, y: t.clientY };
+      moveInput = { x: 0, y: 0 };
+    } else {
+      touchR = t.identifier;
+      touchRStart = { x: t.clientX, y: t.clientY };
+      touchRPrev = { x: t.clientX, y: t.clientY };
+      touchRMoved = false;
+    }
+  }
+}
+
+function handleTouchMove(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier === touchL) {
+      const dx = t.clientX - touchLStart.x;
+      const dy = t.clientY - touchLStart.y;
+      const maxR = 50;
+      moveInput.x = Math.max(-1, Math.min(1, dx / maxR));
+      moveInput.y = Math.max(-1, Math.min(1, dy / maxR));
+    }
+    if (t.identifier === touchR) {
+      const dx = t.clientX - touchRPrev.x;
+      touchRPrev = { x: t.clientX, y: t.clientY };
+      lookDelta += dx;
+      const totalMove = Math.abs(t.clientX - touchRStart.x) + Math.abs(t.clientY - touchRStart.y);
+      if (totalMove > 15) touchRMoved = true;
+    }
+  }
+}
+
+function handleTouchEnd(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier === touchL) {
+      touchL = null;
+      moveInput = { x: 0, y: 0 };
+    }
+    if (t.identifier === touchR) {
+      if (!touchRMoved) {
+        shootRequested = true;
+      }
+      touchR = null;
+    }
+  }
+}
+
+canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+
+overlay.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  handleOverlayTap();
+}, { passive: false });
+overlay.addEventListener('click', handleOverlayTap);
+
+function handleOverlayTap() {
+  if (gameState === STATES.TITLE) {
+    resetGame();
+    gameState = STATES.PLAYING;
+    overlay.classList.add('hidden');
+    initAudio();
+  } else if (gameState === STATES.GAME_OVER) {
+    resetGame();
+    gameState = STATES.PLAYING;
+    overlay.classList.add('hidden');
+  } else if (gameState === STATES.LEVEL_COMPLETE) {
+    currentLevel++;
+    if (currentLevel >= LEVELS.length) {
+      gameState = STATES.WIN;
+      showOverlay('win');
+    } else {
+      initPlayer();
+      initLevel();
+      gameState = STATES.PLAYING;
+      overlay.classList.add('hidden');
+    }
+  } else if (gameState === STATES.WIN) {
+    gameState = STATES.TITLE;
+    showOverlay('title');
+  }
+}
+
+function showOverlay(type) {
+  overlay.classList.remove('hidden');
+  if (type === 'title') {
+    overlayContent.className = 'title-text';
+    overlayContent.innerHTML = '<h1>HELLFIRE</h1><h2>Descent into Darkness</h2><p>TAP TO BEGIN</p>';
+  } else if (type === 'gameover') {
+    overlayContent.className = 'title-text game-over-text';
+    overlayContent.innerHTML = '<h1>YOU DIED</h1><p>Tap to try again</p>';
+  } else if (type === 'levelcomplete') {
+    const time = ((performance.now() - levelStartTime) / 1000).toFixed(1);
+    overlayContent.className = 'title-text level-text';
+    overlayContent.innerHTML = `<h1>LEVEL COMPLETE</h1><p>Kills: ${kills}/${totalKills} | Time: ${time}s</p><p style="margin-top:20px;animation:pulse 1.5s infinite">TAP TO CONTINUE</p>`;
+  } else if (type === 'win') {
+    overlayContent.className = 'title-text win-text';
+    overlayContent.innerHTML = '<h1>VICTORY!</h1><p>Hell has been vanquished... for now.</p><p style="margin-top:20px;animation:pulse 1.5s infinite">TAP TO RETURN</p>';
+  }
+}
+
+let audioCtx = null;
+function initAudio() {
+  if (audioCtx) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  } catch(e) {}
+}
+
+function playSound(type) {
+  if (!audioCtx) return;
+  try {
+    const now = audioCtx.currentTime;
+    const master = audioCtx.createGain();
+    master.gain.value = 0.15;
+    master.connect(audioCtx.destination);
+
+    if (type === 'pistol') {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'square';
+      o.frequency.setValueAtTime(300, now);
+      o.frequency.exponentialRampToValueAtTime(50, now + 0.1);
+      g.gain.setValueAtTime(0.5, now);
+      g.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+      o.connect(g).connect(master);
+      o.start(now); o.stop(now + 0.1);
+
+      const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.08, audioCtx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+      const noise = audioCtx.createBufferSource();
+      const ng = audioCtx.createGain();
+      noise.buffer = buf;
+      ng.gain.setValueAtTime(0.3, now);
+      ng.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
+      noise.connect(ng).connect(master);
+      noise.start(now); noise.stop(now + 0.08);
+    } else if (type === 'shotgun') {
+      const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.2, audioCtx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 0.5);
+      const noise = audioCtx.createBufferSource();
+      const ng = audioCtx.createGain();
+      noise.buffer = buf;
+      ng.gain.setValueAtTime(0.6, now);
+      ng.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+      noise.connect(ng).connect(master);
+      noise.start(now); noise.stop(now + 0.2);
+
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'sawtooth';
+      o.frequency.setValueAtTime(200, now);
+      o.frequency.exponentialRampToValueAtTime(30, now + 0.15);
+      g.gain.setValueAtTime(0.4, now);
+      g.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+      o.connect(g).connect(master);
+      o.start(now); o.stop(now + 0.15);
+    } else if (type === 'plasma') {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(800, now);
+      o.frequency.exponentialRampToValueAtTime(200, now + 0.15);
+      g.gain.setValueAtTime(0.3, now);
+      g.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+      o.connect(g).connect(master);
+      o.start(now); o.stop(now + 0.15);
+
+      const o2 = audioCtx.createOscillator();
+      const g2 = audioCtx.createGain();
+      o2.type = 'sine';
+      o2.frequency.setValueAtTime(1200, now);
+      o2.frequency.exponentialRampToValueAtTime(400, now + 0.1);
+      g2.gain.setValueAtTime(0.2, now);
+      g2.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+      o2.connect(g2).connect(master);
+      o2.start(now); o2.stop(now + 0.1);
+    } else if (type === 'hit') {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'square';
+      o.frequency.setValueAtTime(150, now);
+      o.frequency.exponentialRampToValueAtTime(50, now + 0.08);
+      g.gain.setValueAtTime(0.3, now);
+      g.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
+      o.connect(g).connect(master);
+      o.start(now); o.stop(now + 0.08);
+    } else if (type === 'enemy_die') {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'sawtooth';
+      o.frequency.setValueAtTime(400, now);
+      o.frequency.exponentialRampToValueAtTime(30, now + 0.4);
+      g.gain.setValueAtTime(0.4, now);
+      g.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+      o.connect(g).connect(master);
+      o.start(now); o.stop(now + 0.4);
+    } else if (type === 'pickup') {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(523, now);
+      o.frequency.setValueAtTime(659, now + 0.08);
+      o.frequency.setValueAtTime(784, now + 0.16);
+      g.gain.setValueAtTime(0.3, now);
+      g.gain.setValueAtTime(0.3, now + 0.2);
+      g.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+      o.connect(g).connect(master);
+      o.start(now); o.stop(now + 0.3);
+    } else if (type === 'pain') {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'sawtooth';
+      o.frequency.setValueAtTime(200, now);
+      o.frequency.exponentialRampToValueAtTime(80, now + 0.2);
+      g.gain.setValueAtTime(0.3, now);
+      g.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+      o.connect(g).connect(master);
+      o.start(now); o.stop(now + 0.2);
+    } else if (type === 'door') {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'triangle';
+      o.frequency.setValueAtTime(80, now);
+      o.frequency.linearRampToValueAtTime(120, now + 0.5);
+      g.gain.setValueAtTime(0.2, now);
+      g.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+      o.connect(g).connect(master);
+      o.start(now); o.stop(now + 0.5);
+    } else if (type === 'explode') {
+      const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.4, audioCtx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 0.3);
+      const noise = audioCtx.createBufferSource();
+      const ng = audioCtx.createGain();
+      noise.buffer = buf;
+      ng.gain.setValueAtTime(0.5, now);
+      ng.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+      noise.connect(ng).connect(master);
+      noise.start(now); noise.stop(now + 0.4);
+    }
+  } catch(e) {}
+}
+
+function spawnParticles(x, y, color, count, spread) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * spread,
+      vy: (Math.random() - 0.5) * spread,
+      life: 0.3 + Math.random() * 0.4,
+      maxLife: 0.3 + Math.random() * 0.4,
+      color,
+      size: 0.05 + Math.random() * 0.1,
+    });
+    if (particles.length > 200) particles.shift();
+  }
+}
+
+function fireWeapon() {
+  const weapon = WEAPONS[player.currentWeapon];
+  if (player.fireTimer > 0) return;
+  if (player.ammo[weapon.ammoType] < weapon.ammoPerShot) return;
+
+  player.ammo[weapon.ammoType] -= weapon.ammoPerShot;
+  player.fireTimer = weapon.fireRate;
+  weaponKick = 1.0;
+  muzzleFlash = 0.1;
+  screenShake = 0.05;
+
+  const soundNames = ['pistol', 'shotgun', 'plasma'];
+  playSound(soundNames[player.currentWeapon]);
+
+  const pellets = weapon.pellets || 1;
+  for (let p = 0; p < pellets; p++) {
+    const angle = player.angle + (Math.random() - 0.5) * weapon.spread;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+
+    let closestEnemy = null;
+    let closestDist = 64;
+
+    for (const enemy of enemies) {
+      if (!enemy.active || enemy.state === 'dead') continue;
+
+      const dx = enemy.x - player.x;
+      const dy = enemy.y - player.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      const enemyAngle = Math.atan2(dy, dx);
+      let angleDiff = enemyAngle - angle;
+      while (angleDiff > Math.PI) angleDiff -= TWO_PI;
+      while (angleDiff < -Math.PI) angleDiff += TWO_PI;
+
+      const hitWidth = enemy.size / dist;
+      if (Math.abs(angleDiff) < hitWidth && dist < closestDist) {
+        if (canSee(player.x, player.y, enemy.x, enemy.y)) {
+          closestEnemy = enemy;
+          closestDist = dist;
+        }
+      }
+    }
+
+    if (closestEnemy) {
+      closestEnemy.health -= weapon.damage;
+      closestEnemy.painTimer = 0.15;
+      closestEnemy.state = 'chase';
+      closestEnemy.alertTimer = 0;
+      playSound('hit');
+      spawnParticles(closestEnemy.x, closestEnemy.y, '#FF4400', 5, 2);
+
+      if (closestEnemy.health <= 0) {
+        closestEnemy.state = 'dead';
+        closestEnemy.deathTimer = 1.0;
+        kills++;
+        playSound('enemy_die');
+        spawnParticles(closestEnemy.x, closestEnemy.y, closestEnemy.color, 15, 3);
+        screenShake = 0.15;
+      }
+    } else {
+      const hitDist = castRay(player.x, player.y, angle).dist;
+      const hx = player.x + cos * hitDist * 0.95;
+      const hy = player.y + sin * hitDist * 0.95;
+      spawnParticles(hx, hy, '#FFAA44', 3, 1);
+    }
+  }
+}
+
+function update(dt) {
+  if (gameState !== STATES.PLAYING) return;
+
+  let moveX = 0, moveY = 0;
+  let rot = 0;
+
+  if (keys['w'] || keys['arrowup']) moveY = -1;
+  if (keys['s'] || keys['arrowdown']) moveY = 1;
+  if (keys['a']) moveX = -1;
+  if (keys['d']) moveX = 1;
+  if (keys['arrowleft']) rot = -1;
+  if (keys['arrowright']) rot = 1;
+  if (keys[' '] || keys['f']) { shootRequested = true; }
+  if (keys['1']) switchWeapon(0);
+  if (keys['2']) switchWeapon(1);
+  if (keys['3']) switchWeapon(2);
+
+  moveX += moveInput.x;
+  moveY += moveInput.y;
+
+  const lookSens = 0.003;
+  player.angle += lookDelta * lookSens;
+  lookDelta = 0;
+  player.angle += rot * player.rotSpeed * dt;
+
+  const cos = Math.cos(player.angle);
+  const sin = Math.sin(player.angle);
+  const speed = player.speed * dt;
+  const dx = (cos * -moveY + sin * moveX) * speed;
+  const dy = (sin * -moveY - cos * moveX) * speed;
+
+  const RADIUS = 0.25;
+  if (!isWall(player.x + dx + RADIUS * Math.sign(dx), player.y)) player.x += dx;
+  if (!isWall(player.x, player.y + dy + RADIUS * Math.sign(dy))) player.y += dy;
+
+  const isMoving = Math.abs(dx) + Math.abs(dy) > 0.001;
+  if (isMoving) weaponBob += dt * 8;
+
+  if (player.fireTimer > 0) player.fireTimer -= dt;
+  if (shootRequested && player.fireTimer <= 0) {
+    fireWeapon();
+  }
+  shootRequested = false;
+
+  weaponKick *= Math.pow(0.001, dt);
+  if (weaponKick < 0.01) weaponKick = 0;
+  muzzleFlash -= dt;
+  if (muzzleFlash < 0) muzzleFlash = 0;
+  screenShake *= Math.pow(0.001, dt);
+  damageFlash -= dt * 2;
+  if (damageFlash < 0) damageFlash = 0;
+  pickupFlash -= dt * 3;
+  if (pickupFlash < 0) pickupFlash = 0;
+
+  for (const enemy of enemies) {
+    if (!enemy.active) continue;
+
+    if (enemy.state === 'dead') {
+      enemy.deathTimer -= dt;
+      if (enemy.deathTimer <= 0) {
+        enemy.active = false;
+      }
+      continue;
+    }
+
+    if (enemy.painTimer > 0) {
+      enemy.painTimer -= dt;
+      continue;
+    }
+
+    const dx = player.x - enemy.x;
+    const dy = player.y - enemy.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (enemy.state === 'idle') {
+      if (dist < 8 && canSee(enemy.x, enemy.y, player.x, player.y)) {
+        enemy.state = 'chase';
+        enemy.alertTimer = 0.5;
+      }
+    }
+
+    if (enemy.state === 'chase') {
+      if (enemy.alertTimer > 0) {
+        enemy.alertTimer -= dt;
+        continue;
+      }
+
+      if (dist > enemy.attackRange || !canSee(enemy.x, enemy.y, player.x, player.y)) {
+        const angle = Math.atan2(dy, dx);
+        const moveSpeed = enemy.speed * dt;
+        let newX = enemy.x + Math.cos(angle) * moveSpeed;
+        let newY = enemy.y + Math.sin(angle) * moveSpeed;
+
+        if (isWall(newX, enemy.y)) {
+          newX = enemy.x;
+          newY = enemy.y + Math.sign(dy) * moveSpeed;
+        }
+        if (isWall(enemy.x, newY)) {
+          newY = enemy.y;
+          newX = enemy.x + Math.sign(dx) * moveSpeed;
+        }
+        if (!isWall(newX, newY)) {
+          enemy.x = newX;
+          enemy.y = newY;
+        }
+      }
+
+      enemy.attackTimer -= dt;
+      if (dist <= enemy.attackRange && enemy.attackTimer <= 0 && canSee(enemy.x, enemy.y, player.x, player.y)) {
+        enemy.attackTimer = enemy.attackCooldown;
+
+        if (enemy.melee) {
+          if (dist < 1.5) {
+            let dmg = enemy.damage;
+            if (player.armor > 0) {
+              const absorbed = Math.min(player.armor, Math.floor(dmg * 0.6));
+              player.armor -= absorbed;
+              dmg -= absorbed;
+            }
+            player.health -= dmg;
+            damageFlash = 1.0;
+            screenShake = 0.1;
+            playSound('pain');
+          }
+        } else {
+          let dmg = enemy.damage;
+          const hitChance = Math.max(0.3, 1.0 - dist / 15);
+          if (Math.random() < hitChance) {
+            if (player.armor > 0) {
+              const absorbed = Math.min(player.armor, Math.floor(dmg * 0.6));
+              player.armor -= absorbed;
+              dmg -= absorbed;
+            }
+            player.health -= dmg;
+            damageFlash = 1.0;
+            screenShake = 0.1;
+            playSound('pain');
+          }
+          spawnParticles(enemy.x, enemy.y, enemy.eyeColor, 3, 2);
+        }
+      }
+    }
+  }
+
+  for (const pickup of pickups) {
+    if (!pickup.active) continue;
+    pickup.bobPhase += dt * 3;
+
+    const dx = player.x - pickup.x;
+    const dy = player.y - pickup.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist < 0.6) {
+      let taken = false;
+      switch (pickup.type) {
+        case 'health':
+          if (player.health < 100) {
+            player.health = Math.min(100, player.health + 25);
+            taken = true;
+          }
+          break;
+        case 'megahealth':
+          player.health = Math.min(200, player.health + 100);
+          taken = true;
+          break;
+        case 'armor':
+          if (player.armor < 100) {
+            player.armor = Math.min(100, player.armor + 50);
+            taken = true;
+          }
+          break;
+        case 'ammo_bullets':
+          if (player.ammo.bullets < 200) {
+            player.ammo.bullets = Math.min(200, player.ammo.bullets + 20);
+            taken = true;
+          }
+          break;
+        case 'ammo_shells':
+          if (player.ammo.shells < 50) {
+            player.ammo.shells = Math.min(50, player.ammo.shells + 8);
+            taken = true;
+          }
+          break;
+        case 'ammo_cells':
+          if (player.ammo.cells < 300) {
+            player.ammo.cells = Math.min(300, player.ammo.cells + 40);
+            taken = true;
+          }
+          break;
+        case 'shotgun':
+          if (!player.weapons[1]) {
+            player.weapons[1] = true;
+            player.ammo.shells = Math.min(50, player.ammo.shells + 8);
+            taken = true;
+          } else if (player.ammo.shells < 50) {
+            player.ammo.shells = Math.min(50, player.ammo.shells + 8);
+            taken = true;
+          }
+          break;
+        case 'plasma':
+          if (!player.weapons[2]) {
+            player.weapons[2] = true;
+            player.ammo.cells = Math.min(300, player.ammo.cells + 40);
+            taken = true;
+          } else if (player.ammo.cells < 300) {
+            player.ammo.cells = Math.min(300, player.ammo.cells + 40);
+            taken = true;
+          }
+          break;
+      }
+      if (taken) {
+        pickup.active = false;
+        pickupFlash = 0.5;
+        playSound('pickup');
+      }
+    }
+  }
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  if (player.health <= 0) {
+    player.health = 0;
+    gameState = STATES.GAME_OVER;
+    showOverlay('gameover');
+    playSound('explode');
+    return;
+  }
+
+  const exitDef = LEVELS[currentLevel].exit;
+  if (exitDef) {
+    const edx = player.x - (exitDef.x + 0.5);
+    const edy = player.y - (exitDef.y + 0.5);
+    if (Math.sqrt(edx * edx + edy * edy) < 0.8) {
+      gameState = STATES.LEVEL_COMPLETE;
+      showOverlay('levelcomplete');
+      playSound('pickup');
+    }
+  }
+}
+
+function switchWeapon(idx) {
+  if (player.weapons[idx]) {
+    player.currentWeapon = idx;
+  }
+}
+
+function render() {
+  resize();
+
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, RW, RH);
+
+  if (gameState === STATES.TITLE || gameState === STATES.GAME_OVER ||
+      gameState === STATES.LEVEL_COMPLETE || gameState === STATES.WIN) {
+    return;
+  }
+
+  const shakeX = (Math.random() - 0.5) * screenShake * 10;
+  const shakeY = (Math.random() - 0.5) * screenShake * 10;
+
+  const halfH = RH / 2;
+
+  const ceilGrad = ctx.createLinearGradient(0, 0, 0, halfH);
+  ceilGrad.addColorStop(0, '#1a0a00');
+  ceilGrad.addColorStop(1, '#331100');
+  ctx.fillStyle = ceilGrad;
+  ctx.fillRect(0, 0, RW, halfH);
+
+  const floorGrad = ctx.createLinearGradient(0, halfH, 0, RH);
+  floorGrad.addColorStop(0, '#222222');
+  floorGrad.addColorStop(1, '#111111');
+  ctx.fillStyle = floorGrad;
+  ctx.fillRect(0, halfH, RW, halfH);
+
+  const fov = FOV;
+  const numRays = RW;
+  const sprites = [];
+
+  for (let i = 0; i < numRays; i++) {
+    const rayAngle = player.angle - fov / 2 + (i / numRays) * fov;
+    const result = castRay(player.x, player.y, rayAngle);
+    const perpDist = result.dist * Math.cos(rayAngle - player.angle);
+
+    zBuffer[i] = perpDist;
+
+    if (result.hit > 0) {
+      const lineHeight = Math.floor(RH / perpDist);
+      const drawStart = Math.floor(halfH - lineHeight / 2 + shakeY);
+
+      const colors = WALL_COLORS[result.hit] || WALL_COLORS[1];
+      const wallColor = result.side === 1 ? colors.dark : colors.main;
+
+      const shade = Math.max(0.15, 1.0 - perpDist / 16);
+
+      ctx.fillStyle = shadeColor(wallColor, shade);
+      ctx.fillRect(Math.floor(i + shakeX), drawStart, 1, lineHeight);
+
+      if (result.wallX < 0.05 || result.wallX > 0.95) {
+        ctx.fillStyle = shadeColor(colors.light, shade * 0.5);
+        ctx.fillRect(Math.floor(i + shakeX), drawStart, 1, lineHeight);
+      }
+    }
+  }
+
+  for (const enemy of enemies) {
+    if (!enemy.active) continue;
+    sprites.push({
+      x: enemy.x, y: enemy.y,
+      type: 'enemy',
+      data: enemy,
+    });
+  }
+  for (const pickup of pickups) {
+    if (!pickup.active) continue;
+    sprites.push({
+      x: pickup.x, y: pickup.y,
+      type: 'pickup',
+      data: pickup,
+    });
+  }
+  for (const particle of particles) {
+    sprites.push({
+      x: particle.x, y: particle.y,
+      type: 'particle',
+      data: particle,
+    });
+  }
+
+  const exitDef = LEVELS[currentLevel].exit;
+  if (exitDef) {
+    sprites.push({
+      x: exitDef.x + 0.5, y: exitDef.y + 0.5,
+      type: 'exit',
+      data: exitDef,
+    });
+  }
+
+  for (const s of sprites) {
+    const dx = s.x - player.x;
+    const dy = s.y - player.y;
+    s.dist = Math.sqrt(dx * dx + dy * dy);
+    s.angle = Math.atan2(dy, dx);
+  }
+  sprites.sort((a, b) => b.dist - a.dist);
+
+  for (const s of sprites) {
+    let angleDiff = s.angle - player.angle;
+    while (angleDiff > Math.PI) angleDiff -= TWO_PI;
+    while (angleDiff < -Math.PI) angleDiff += TWO_PI;
+
+    if (Math.abs(angleDiff) > fov) continue;
+
+    const screenX = Math.floor(RW / 2 + (angleDiff / fov) * RW) + shakeX;
+
+    if (s.type === 'particle') {
+      const p = s.data;
+      if (s.dist < 0.2) continue;
+      const size = Math.floor((p.size * RH) / s.dist);
+      if (size < 1) continue;
+      const screenY = halfH + shakeY;
+      const alpha = p.life / p.maxLife;
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(screenX - size / 2, screenY - size / 2, size, size);
+      ctx.globalAlpha = 1;
+      continue;
+    }
+
+    if (s.type === 'exit') {
+      const spriteSize = Math.floor(RH / s.dist * 0.6);
+      if (spriteSize < 2) continue;
+      const screenY = halfH - spriteSize / 2 + shakeY;
+
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 200);
+      const startCol = Math.floor(screenX - spriteSize / 2);
+      const endCol = Math.floor(screenX + spriteSize / 2);
+
+      for (let col = startCol; col < endCol; col++) {
+        if (col < 0 || col >= RW) continue;
+        if (s.dist >= zBuffer[col]) continue;
+        ctx.fillStyle = `rgba(0, 255, 100, ${0.3 + pulse * 0.4})`;
+        ctx.fillRect(col, screenY, 1, spriteSize);
+      }
+      continue;
+    }
+
+    if (s.dist < 0.3) continue;
+
+    if (s.type === 'enemy') {
+      const enemy = s.data;
+      const spriteSize = Math.floor(RH / s.dist * enemy.size);
+      if (spriteSize < 2) continue;
+      const screenY = halfH - spriteSize / 2 + shakeY;
+      const shade = Math.max(0.2, 1.0 - s.dist / 14);
+
+      const startCol = Math.floor(screenX - spriteSize / 2);
+      const endCol = Math.floor(screenX + spriteSize / 2);
+
+      for (let col = startCol; col < endCol; col++) {
+        if (col < 0 || col >= RW) continue;
+        if (s.dist >= zBuffer[col]) continue;
+
+        const localX = (col - startCol) / spriteSize;
+        const localXAbs = Math.abs(localX - 0.5) * 2;
+
+        if (enemy.state === 'dead') {
+          const deathProgress = 1 - enemy.deathTimer;
+          const collapseH = spriteSize * (1 - deathProgress * 0.8);
+          const newY = screenY + spriteSize - collapseH;
+          ctx.fillStyle = shadeColor(enemy.color, shade * (1 - deathProgress * 0.5));
+          ctx.fillRect(col, newY, 1, collapseH);
+          continue;
+        }
+
+        const bodyWidth = 0.7;
+        if (localXAbs > bodyWidth) continue;
+
+        const headTop = 0.0;
+        const headBottom = 0.35;
+        const bodyBottom = 1.0;
+
+        ctx.fillStyle = shadeColor(enemy.color, shade);
+        if (enemy.painTimer > 0) {
+          ctx.fillStyle = '#FFFFFF';
+        }
+        ctx.fillRect(col, screenY + spriteSize * headTop, 1, spriteSize * bodyBottom);
+
+        if (localX > 0.3 && localX < 0.45 || localX > 0.55 && localX < 0.7) {
+          const eyeY = screenY + spriteSize * 0.15;
+          const eyeH = Math.max(2, spriteSize * 0.08);
+          ctx.fillStyle = enemy.painTimer > 0 ? '#FF0000' : enemy.eyeColor;
+          ctx.fillRect(col, eyeY, 1, eyeH);
+        }
+      }
+      continue;
+    }
+
+    if (s.type === 'pickup') {
+      const pickup = s.data;
+      const bob = Math.sin(pickup.bobPhase) * 0.1;
+      const spriteSize = Math.floor(RH / s.dist * 0.3);
+      if (spriteSize < 2) continue;
+      const screenY = halfH - spriteSize / 2 + shakeY + bob * spriteSize;
+
+      let pickupColor;
+      switch (pickup.type) {
+        case 'health': case 'megahealth': pickupColor = '#FF0000'; break;
+        case 'armor': pickupColor = '#0088FF'; break;
+        case 'ammo_bullets': pickupColor = '#FFAA00'; break;
+        case 'ammo_shells': pickupColor = '#FF6600'; break;
+        case 'ammo_cells': pickupColor = '#00CCFF'; break;
+        case 'shotgun': pickupColor = '#AA6633'; break;
+        case 'plasma': pickupColor = '#4444FF'; break;
+        default: pickupColor = '#FFFFFF';
+      }
+
+      const startCol = Math.floor(screenX - spriteSize / 2);
+      const endCol = Math.floor(screenX + spriteSize / 2);
+      for (let col = startCol; col < endCol; col++) {
+        if (col < 0 || col >= RW) continue;
+        if (s.dist >= zBuffer[col]) continue;
+        const localX = Math.abs((col - startCol) / spriteSize - 0.5) * 2;
+        if (localX > 0.7) continue;
+        ctx.fillStyle = pickupColor;
+        ctx.fillRect(col, screenY, 1, spriteSize);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(col, screenY, 1, Math.max(1, spriteSize * 0.15));
+      }
+    }
+  }
+
+  if (muzzleFlash > 0) {
+    ctx.globalAlpha = muzzleFlash * 5;
+    ctx.fillStyle = WEAPONS[player.currentWeapon].projectileColor;
+    const flashSize = RW * 0.15;
+    ctx.fillRect(RW / 2 - flashSize / 2, RH * 0.55 - flashSize, flashSize, flashSize);
+    ctx.globalAlpha = 1;
+  }
+
+  drawHUD();
+
+  if (damageFlash > 0) {
+    ctx.globalAlpha = damageFlash * 0.4;
+    ctx.fillStyle = '#FF0000';
+    ctx.fillRect(0, 0, RW, RH);
+    ctx.globalAlpha = 1;
+  }
+
+  if (pickupFlash > 0) {
+    ctx.globalAlpha = pickupFlash * 0.2;
+    ctx.fillStyle = '#FFFF00';
+    ctx.fillRect(0, 0, RW, RH);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawHUD() {
+  const hudH = Math.floor(RH * 0.12);
+  const hudY = RH - hudH;
+
+  ctx.fillStyle = 'rgba(20, 10, 5, 0.85)';
+  ctx.fillRect(0, hudY, RW, hudH);
+  ctx.fillStyle = '#553311';
+  ctx.fillRect(0, hudY, RW, 1);
+
+  const fontSize = Math.max(6, Math.floor(hudH * 0.35));
+  ctx.font = `bold ${fontSize}px monospace`;
+
+  const weapon = WEAPONS[player.currentWeapon];
+  const ammoCount = player.ammo[weapon.ammoType];
+
+  const section = RW / 4;
+
+  ctx.fillStyle = player.health > 25 ? '#FF3333' : '#FF0000';
+  ctx.textAlign = 'center';
+  ctx.fillText(`HP ${player.health}`, section * 0.7, hudY + hudH * 0.45);
+
+  const hpBarW = section * 0.8;
+  const hpBarH = Math.max(2, hudH * 0.15);
+  const hpBarX = section * 0.7 - hpBarW / 2;
+  const hpBarY = hudY + hudH * 0.55;
+  ctx.fillStyle = '#330000';
+  ctx.fillRect(hpBarX, hpBarY, hpBarW, hpBarH);
+  ctx.fillStyle = player.health > 25 ? '#FF3333' : '#FF0000';
+  ctx.fillRect(hpBarX, hpBarY, hpBarW * Math.min(1, player.health / 100), hpBarH);
+
+  ctx.fillStyle = '#4488FF';
+  ctx.fillText(`AR ${player.armor}`, section * 1.7, hudY + hudH * 0.45);
+
+  const arBarW = section * 0.8;
+  const arBarX = section * 1.7 - arBarW / 2;
+  ctx.fillStyle = '#001133';
+  ctx.fillRect(arBarX, hpBarY, arBarW, hpBarH);
+  ctx.fillStyle = '#4488FF';
+  ctx.fillRect(arBarX, hpBarY, arBarW * Math.min(1, player.armor / 100), hpBarH);
+
+  ctx.fillStyle = '#FFAA00';
+  ctx.fillText(`${weapon.name}`, section * 2.7, hudY + hudH * 0.45);
+  ctx.fillText(`${ammoCount}`, section * 2.7, hudY + hudH * 0.75);
+
+  const wpnBtnSize = Math.max(8, Math.floor(hudH * 0.5));
+  const wpnY = hudY + (hudH - wpnBtnSize) / 2;
+  for (let i = 0; i < 3; i++) {
+    const btnX = section * 3.2 + i * (wpnBtnSize + 2);
+    ctx.fillStyle = player.weapons[i]
+      ? (i === player.currentWeapon ? '#885500' : '#332200')
+      : '#111111';
+    ctx.fillRect(btnX, wpnY, wpnBtnSize, wpnBtnSize);
+    ctx.fillStyle = player.weapons[i] ? '#FFCC00' : '#333';
+    ctx.font = `bold ${Math.floor(wpnBtnSize * 0.6)}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.fillText(`${i + 1}`, btnX + wpnBtnSize / 2, wpnY + wpnBtnSize * 0.7);
+  }
+
+  const bobAmt = Math.sin(weaponBob) * 3;
+  const kickAmt = weaponKick * 10;
+  const wpnDrawW = RW * 0.2;
+  const wpnDrawH = RH * 0.2;
+  const wpnDrawX = RW / 2 - wpnDrawW / 2 + bobAmt;
+  const wpnDrawY = hudY - wpnDrawH + kickAmt;
+
+  ctx.fillStyle = weapon.color;
+  ctx.fillRect(wpnDrawX + wpnDrawW * 0.35, wpnDrawY, wpnDrawW * 0.3, wpnDrawH);
+  ctx.fillStyle = shadeColor(weapon.color, 0.7);
+  ctx.fillRect(wpnDrawX + wpnDrawW * 0.2, wpnDrawY + wpnDrawH * 0.3, wpnDrawW * 0.6, wpnDrawH * 0.5);
+  ctx.fillStyle = '#222';
+  ctx.fillRect(wpnDrawX + wpnDrawW * 0.4, wpnDrawY, wpnDrawW * 0.2, wpnDrawH * 0.1);
+
+  drawMinimap();
+
+  const weaponBtnTouchSize = Math.max(20, wpnBtnSize * 2);
+  canvas._weaponBtns = [];
+  for (let i = 0; i < 3; i++) {
+    const btnScreenX = (section * 3.2 + i * (wpnBtnSize + 2)) / RENDER_SCALE;
+    const btnScreenY = wpnY / RENDER_SCALE;
+    canvas._weaponBtns.push({
+      x: btnScreenX, y: btnScreenY,
+      w: weaponBtnTouchSize, h: weaponBtnTouchSize,
+      idx: i,
+    });
+  }
+}
+
+canvas.addEventListener('touchstart', (e) => {
+  if (!canvas._weaponBtns) return;
+  for (const t of e.changedTouches) {
+    for (const btn of canvas._weaponBtns) {
+      if (t.clientX >= btn.x && t.clientX <= btn.x + btn.w &&
+          t.clientY >= btn.y && t.clientY <= btn.y + btn.h) {
+        switchWeapon(btn.idx);
+      }
+    }
+  }
+}, { passive: true });
+
+function drawMinimap() {
+  const grid = LEVELS[currentLevel].grid;
+  const mapH = grid.length;
+  const mapW = grid[0].length;
+  const cellSize = Math.max(2, Math.floor(Math.min(RW * 0.08 / mapW, RH * 0.15 / mapH)));
+  const mmW = mapW * cellSize;
+  const mmH = mapH * cellSize;
+  const mmX = 2;
+  const mmY = 2;
+
+  ctx.globalAlpha = 0.6;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(mmX, mmY, mmW, mmH);
+
+  for (let y = 0; y < mapH; y++) {
+    for (let x = 0; x < mapW; x++) {
+      if (grid[y][x] > 0) {
+        const c = WALL_COLORS[grid[y][x]] || WALL_COLORS[1];
+        ctx.fillStyle = c.dark;
+        ctx.fillRect(mmX + x * cellSize, mmY + y * cellSize, cellSize, cellSize);
+      }
+    }
+  }
+
+  for (const enemy of enemies) {
+    if (!enemy.active || enemy.state === 'dead') continue;
+    ctx.fillStyle = '#FF0000';
+    ctx.fillRect(mmX + enemy.x * cellSize - 1, mmY + enemy.y * cellSize - 1, 2, 2);
+  }
+
+  for (const pickup of pickups) {
+    if (!pickup.active) continue;
+    ctx.fillStyle = '#FFFF00';
+    ctx.fillRect(mmX + pickup.x * cellSize, mmY + pickup.y * cellSize, 1, 1);
+  }
+
+  const exitDef = LEVELS[currentLevel].exit;
+  if (exitDef) {
+    ctx.fillStyle = '#00FF66';
+    ctx.fillRect(mmX + (exitDef.x + 0.5) * cellSize - 1, mmY + (exitDef.y + 0.5) * cellSize - 1, 3, 3);
+  }
+
+  ctx.fillStyle = '#00FF00';
+  const px = mmX + player.x * cellSize;
+  const py = mmY + player.y * cellSize;
+  ctx.fillRect(px - 1, py - 1, 3, 3);
+
+  const dirLen = cellSize * 2;
+  ctx.strokeStyle = '#00FF00';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(px, py);
+  ctx.lineTo(px + Math.cos(player.angle) * dirLen, py + Math.sin(player.angle) * dirLen);
+  ctx.stroke();
+
+  ctx.globalAlpha = 1;
+}
+
+function shadeColor(hex, factor) {
+  let r = parseInt(hex.slice(1, 3), 16);
+  let g = parseInt(hex.slice(3, 5), 16);
+  let b = parseInt(hex.slice(5, 7), 16);
+  r = Math.floor(r * factor);
+  g = Math.floor(g * factor);
+  b = Math.floor(b * factor);
+  return `rgb(${r},${g},${b})`;
+}
+
+let lastTime = performance.now();
+function gameLoop(timestamp) {
+  let dt = (timestamp - lastTime) / 1000;
+  lastTime = timestamp;
+  if (dt > 0.05) dt = 0.05;
+
+  update(dt);
+  render();
+
+  requestAnimationFrame(gameLoop);
+}
+
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
