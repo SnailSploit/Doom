@@ -20,8 +20,7 @@ html, body {
   display: block;
   width: 100vw;
   height: 100vh;
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
+  image-rendering: auto; /* smooth upscale — late-90s look, not chunky pixels */
 }
 #overlay {
   position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -74,7 +73,7 @@ const ctx = canvas.getContext('2d');
 const overlay = document.getElementById('overlay');
 const overlayContent = document.getElementById('overlayContent');
 
-const RENDER_SCALE = 0.5;
+const RENDER_SCALE = 0.7;
 let W, H, RW, RH;
 
 // Depth buffer, one entry per rendered column. Declared before the first
@@ -127,7 +126,7 @@ let killStreakTimer = 0;
 const STREAK_MSGS = ['', '', 'DOUBLE KILL', 'TRIPLE KILL', 'MULTI KILL', 'RAMPAGE', 'UNSTOPPABLE'];
 
 function generateWallTexture(baseR, baseG, baseB, style) {
-  const size = 64;
+  const size = 128;
   const c = document.createElement('canvas');
   c.width = size; c.height = size;
   const tx = c.getContext('2d');
@@ -1368,8 +1367,8 @@ function render() {
 
       const tex = wallTextures[result.hit];
       if (tex && lineHeight > 4) {
-        const texX = Math.floor(result.wallX * 64);
-        ctx.drawImage(tex, texX, 0, 1, 64, Math.floor(i + shakeX + bobX), drawStart, 1, lineHeight);
+        const texX = Math.floor(result.wallX * tex.width);
+        ctx.drawImage(tex, texX, 0, 1, tex.height, Math.floor(i + shakeX + bobX), drawStart, 1, lineHeight);
         ctx.fillStyle = `rgba(0,0,0,${1 - shade})`;
         ctx.fillRect(Math.floor(i + shakeX + bobX), drawStart, 1, lineHeight);
         if (result.side === 1) {
