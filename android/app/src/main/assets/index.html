@@ -268,6 +268,135 @@ const wallTextures = [
   generateWallTexture(60, 55, 70, 'candy'),
 ];
 
+// Detailed, tiling floor/ceiling textures so the ground and sky read as a real
+// place instead of flat gradient fills. Returns raw pixel data for fast sampling.
+const SURF_SIZE = 128;
+function generateSurfaceTexture(base, kind) {
+  const s = SURF_SIZE;
+  const c = document.createElement('canvas');
+  c.width = s; c.height = s;
+  const tx = c.getContext('2d');
+  // Brighten the (deliberately dark) level tint so the surface is visible.
+  const br = kind === 'floor' ? 2.6 : 1.8;
+  const R = Math.min(255, base.r * br), G = Math.min(255, base.g * br), B = Math.min(255, base.b * br);
+  tx.fillStyle = `rgb(${R|0},${G|0},${B|0})`;
+  tx.fillRect(0, 0, s, s);
+
+  if (kind === 'floor') {
+    // Mottled organic ground: soft blotches, grime cracks, bright specks.
+    for (let i = 0; i < 40; i++) {
+      const x = Math.random() * s, y = Math.random() * s, r = 6 + Math.random() * 22;
+      const g = tx.createRadialGradient(x, y, 0, x, y, r);
+      const t = Math.random() * 0.5 - 0.25;
+      g.addColorStop(0, `rgba(${(R*(1+t))|0},${(G*(1+t))|0},${(B*(1+t))|0},0.5)`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      tx.fillStyle = g;
+      tx.beginPath(); tx.arc(x, y, r, 0, TWO_PI); tx.fill();
+    }
+    tx.strokeStyle = 'rgba(0,0,0,0.28)'; tx.lineWidth = 1;
+    for (let i = 0; i < 10; i++) {
+      tx.beginPath();
+      let x = Math.random() * s, y = Math.random() * s;
+      tx.moveTo(x, y);
+      for (let k = 0; k < 4; k++) { x += (Math.random() - 0.5) * 30; y += (Math.random() - 0.5) * 30; tx.lineTo(x, y); }
+      tx.stroke();
+    }
+    for (let i = 0; i < 120; i++) {
+      const a = Math.random() * 0.25;
+      tx.fillStyle = Math.random() > 0.5 ? `rgba(255,255,255,${a})` : `rgba(0,0,0,${a})`;
+      tx.fillRect(Math.random() * s, Math.random() * s, 1 + Math.random(), 1 + Math.random());
+    }
+    // A few faint glowing spores for the magic vibe.
+    for (let i = 0; i < 6; i++) {
+      const x = Math.random() * s, y = Math.random() * s, r = 2 + Math.random() * 3;
+      const g = tx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, `rgba(${Math.min(255,R+120)|0},${Math.min(255,G+120)|0},255,0.6)`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      tx.fillStyle = g; tx.beginPath(); tx.arc(x, y, r, 0, TWO_PI); tx.fill();
+    }
+  } else {
+    // Cavern/magic sky: soft nebula blotches darker toward center + sparkle stars.
+    for (let i = 0; i < 22; i++) {
+      const x = Math.random() * s, y = Math.random() * s, r = 10 + Math.random() * 30;
+      const g = tx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, `rgba(${(R*1.3)|0},${(G*1.3)|0},${Math.min(255,B*1.5)|0},0.4)`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      tx.fillStyle = g; tx.beginPath(); tx.arc(x, y, r, 0, TWO_PI); tx.fill();
+    }
+    for (let i = 0; i < 70; i++) {
+      const x = Math.random() * s, y = Math.random() * s, a = 0.3 + Math.random() * 0.6;
+      tx.fillStyle = `rgba(255,255,255,${a})`;
+      tx.fillRect(x, y, Math.random() > 0.85 ? 2 : 1, 1);
+    }
+  }
+
+  const img = tx.getImageData(0, 0, s, s);
+  return img.data;
+}
+
+let floorPix = null, ceilPix = null, fcImage = null;
+let vignetteGrad = null;
+function buildSurfaceTextures() {
+  const lvl = LEVELS[currentLevel];
+  floorPix = generateSurfaceTexture(lvl.floorColor || lvl.ambientColor, 'floor');
+  ceilPix = generateSurfaceTexture(lvl.ceilColor || lvl.ambientColor, 'ceiling');
+}
+
+// Perspective-correct textured floor + ceiling (classic raycaster floor casting),
+// with the same distance shading as the walls so everything sits in one space.
+function castFloorCeiling(horizon, fogDist, flicker) {
+  if (!floorPix) buildSurfaceTextures();
+  if (!fcImage || fcImage.width !== RW || fcImage.height !== RH) {
+    fcImage = ctx.createImageData(RW, RH);
+  }
+  const data = fcImage.data;
+  const dirX = Math.cos(player.angle), dirY = Math.sin(player.angle);
+  const planeLen = Math.tan(FOV / 2);
+  const planeX = -Math.sin(player.angle) * planeLen, planeY = Math.cos(player.angle) * planeLen;
+  const rd0x = dirX - planeX, rd0y = dirY - planeY;
+  const rd1x = dirX + planeX, rd1y = dirY + planeY;
+  const S = SURF_SIZE, mask = S - 1;
+  const posZ = 0.5 * RH;
+  const px = player.x, py = player.y;
+  const shadeSpan = fogDist * 1.5;
+  const H = horizon | 0;
+  const maxP = (RH >> 1) + 8; // margin so bob/shake horizon offset leaves no stale rows
+
+  for (let p = 1; p <= maxP; p++) {
+    const rowDist = posZ / p;
+    let shade = (1.0 - rowDist / shadeSpan) * flicker;
+    if (shade < 0.30) shade = 0.30; else if (shade > 1) shade = 1;
+    const stepX = rowDist * (rd1x - rd0x) / RW;
+    const stepY = rowDist * (rd1y - rd0y) / RW;
+    let fx = px + rowDist * rd0x, fy = py + rowDist * rd0y;
+    const floorY = H + p, ceilY = H - p;
+    const floorRow = floorY * RW, ceilRow = ceilY * RW;
+    const doFloor = floorY >= 0 && floorY < RH, doCeil = ceilY >= 0 && ceilY < RH;
+    for (let x = 0; x < RW; x++) {
+      let ufx = fx - (fx | 0); if (ufx < 0) ufx += 1;
+      let ufy = fy - (fy | 0); if (ufy < 0) ufy += 1;
+      const ti = (((ufy * S) & mask) * S + ((ufx * S) & mask)) * 4;
+      if (doFloor) {
+        const o = (floorRow + x) * 4;
+        data[o]     = floorPix[ti] * shade;
+        data[o + 1] = floorPix[ti + 1] * shade;
+        data[o + 2] = floorPix[ti + 2] * shade;
+        data[o + 3] = 255;
+      }
+      if (doCeil) {
+        const o = (ceilRow + x) * 4;
+        const cs = shade * 0.85;
+        data[o]     = ceilPix[ti] * cs;
+        data[o + 1] = ceilPix[ti + 1] * cs;
+        data[o + 2] = ceilPix[ti + 2] * cs;
+        data[o + 3] = 255;
+      }
+      fx += stepX; fy += stepY;
+    }
+  }
+  ctx.putImageData(fcImage, 0, 0);
+}
+
 const WALL_COLORS = [
   null,
   { main: '#6E5EA8', dark: '#4E4080', light: '#9484C8' },
@@ -573,6 +702,7 @@ function initLevel() {
   killStreak = 0;
   killStreakTimer = 0;
   levelStartTime = performance.now();
+  buildSurfaceTextures();
 }
 
 function resetGame() {
@@ -1338,17 +1468,8 @@ function render() {
   const ceil = lvl.ceilColor || amb;
   const flr = lvl.floorColor || amb;
 
-  const ceilGrad = ctx.createLinearGradient(0, 0, 0, halfH);
-  ceilGrad.addColorStop(0, `rgb(${Math.floor(ceil.r*2.0*flickerIntensity)},${Math.floor(ceil.g*2.0*flickerIntensity)},${Math.floor(ceil.b*2.0*flickerIntensity)})`);
-  ceilGrad.addColorStop(1, `rgb(${Math.floor(ceil.r*3.4*flickerIntensity)},${Math.floor(ceil.g*3.4*flickerIntensity)},${Math.floor(ceil.b*3.4*flickerIntensity)})`);
-  ctx.fillStyle = ceilGrad;
-  ctx.fillRect(0, 0, RW, halfH + bobY + shakeY);
-
-  const floorGrad = ctx.createLinearGradient(0, halfH, 0, RH);
-  floorGrad.addColorStop(0, `rgb(${Math.floor(flr.r*3.2)},${Math.floor(flr.g*3.0)},${Math.floor(flr.b*2.8)})`);
-  floorGrad.addColorStop(1, `rgb(${Math.floor(flr.r*0.9)},${Math.floor(flr.g*0.8)},${Math.floor(flr.b*0.7)})`);
-  ctx.fillStyle = floorGrad;
-  ctx.fillRect(0, halfH + bobY + shakeY, RW, halfH);
+  // Perspective-textured floor + ceiling (replaces the old flat gradient fills).
+  castFloorCeiling(halfH + bobY + shakeY, fogDist, flickerIntensity);
 
   const numRays = RW;
   const sprites = [];
@@ -1662,6 +1783,18 @@ function render() {
     ctx.fillRect(RW / 2 - coreSize / 2, RH * 0.52 - flashSize + (flashSize - coreSize) / 2, coreSize, coreSize);
     ctx.globalAlpha = 1;
   }
+
+  // Vignette: darken the edges for depth and atmosphere (cached per size).
+  if (!vignetteGrad || vignetteGrad._w !== RW || vignetteGrad._h !== RH) {
+    const g = ctx.createRadialGradient(RW / 2, RH / 2, RH * 0.32, RW / 2, RH / 2, RH * 0.9);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(0.7, 'rgba(0,0,0,0.12)');
+    g.addColorStop(1, 'rgba(8,2,16,0.55)');
+    g._w = RW; g._h = RH;
+    vignetteGrad = g;
+  }
+  ctx.fillStyle = vignetteGrad;
+  ctx.fillRect(0, 0, RW, RH);
 
   drawWeapon();
   drawHUD();
