@@ -75,6 +75,7 @@ const overlayContent = document.getElementById('overlayContent');
 
 const RENDER_SCALE = 0.7;
 let W, H, RW, RH;
+const _hexCache = {}; // memoized hex->rgb parse (used from load-time sprite baking on)
 
 // Depth buffer, one entry per rendered column. Declared before the first
 // resize() call (which grows it to the render width) to avoid a TDZ error.
@@ -254,6 +255,38 @@ function generateWallTexture(baseR, baseG, baseB, style) {
       tx.arc(ex, ey, eR * 0.2, 0, TWO_PI);
       tx.fill();
     }
+  }
+
+  // Directional lighting + grime so walls read as dimensional stone, not flat
+  // panels: a top-lit vertical gradient, a soft dark edge frame (block seams),
+  // and a scatter of cracks/speckles for surface texture.
+  const lightGrad = tx.createLinearGradient(0, 0, 0, size);
+  lightGrad.addColorStop(0, 'rgba(255,255,255,0.16)');
+  lightGrad.addColorStop(0.5, 'rgba(255,255,255,0.0)');
+  lightGrad.addColorStop(1, 'rgba(0,0,0,0.30)');
+  tx.fillStyle = lightGrad;
+  tx.fillRect(0, 0, size, size);
+  // block-seam frame (ambient occlusion at the edges of each tile)
+  tx.strokeStyle = 'rgba(0,0,0,0.35)';
+  tx.lineWidth = 3;
+  tx.strokeRect(1, 1, size - 2, size - 2);
+  tx.strokeStyle = 'rgba(255,255,255,0.06)';
+  tx.lineWidth = 1;
+  tx.strokeRect(3, 3, size - 6, size - 6);
+  // hairline cracks
+  tx.strokeStyle = 'rgba(0,0,0,0.22)';
+  for (let i = 0; i < 5; i++) {
+    tx.beginPath();
+    let px = Math.random() * size, py = Math.random() * size;
+    tx.moveTo(px, py);
+    for (let k = 0; k < 3; k++) { px += (Math.random() - 0.5) * 34; py += (Math.random() - 0.5) * 34; tx.lineTo(px, py); }
+    tx.stroke();
+  }
+  // fine speckle
+  for (let i = 0; i < 70; i++) {
+    const a = Math.random() * 0.12;
+    tx.fillStyle = Math.random() > 0.5 ? `rgba(255,255,255,${a})` : `rgba(0,0,0,${a})`;
+    tx.fillRect(Math.random() * size, Math.random() * size, 1, 1);
   }
   return c;
 }
@@ -639,6 +672,118 @@ const ENEMY_TYPES = {
     deathMsg: 'MEGABEAST VANQUISHED',
   },
 };
+
+// Pre-render each creature as a detailed, shaded sprite (drawn once), so they
+// read as real monsters instead of crude per-column blobs. Light comes from the
+// upper-left. Billboarded with wall-occlusion at draw time.
+const ESW = 96, ESH = 128;
+function shadeHex(hex, f) {
+  const c = hexToRgb(hex);
+  return `rgb(${Math.min(255,c.r*f)|0},${Math.min(255,c.g*f)|0},${Math.min(255,c.b*f)|0})`;
+}
+function generateEnemySprite(t) {
+  const c = document.createElement('canvas');
+  c.width = ESW; c.height = ESH;
+  const x = c.getContext('2d');
+  const cx = ESW / 2;
+  const eye = t.eyeColor, acc = t.accentColor, b1 = t.bodyColor1, b2 = t.bodyColor2;
+  const outline = (drawPath) => { x.save(); x.lineJoin = 'round'; x.lineWidth = 3; x.strokeStyle = 'rgba(0,0,0,0.55)'; drawPath(); x.stroke(); x.restore(); };
+
+  if (t.shape === 'blob') {
+    // Globkin: glossy gelatinous blob with a jagged grin.
+    const bodyPath = () => { x.beginPath(); x.moveTo(cx-40, 118); x.quadraticCurveTo(cx-52, 60, cx-30, 40); x.quadraticCurveTo(cx, 14, cx+30, 40); x.quadraticCurveTo(cx+52, 60, cx+40, 118); x.quadraticCurveTo(cx, 128, cx-40, 118); x.closePath(); };
+    outline(bodyPath);
+    const g = x.createRadialGradient(cx-14, 46, 6, cx, 70, 66);
+    g.addColorStop(0, shadeHex(b1, 1.35)); g.addColorStop(0.6, b1); g.addColorStop(1, b2);
+    x.fillStyle = g; bodyPath(); x.fill();
+    // sheen
+    x.fillStyle = 'rgba(255,255,255,0.35)'; x.beginPath(); x.ellipse(cx-14, 44, 12, 7, -0.5, 0, TWO_PI); x.fill();
+    // eyes (angry)
+    for (const s of [-1, 1]) {
+      x.fillStyle = '#fff'; x.beginPath(); x.ellipse(cx + s*15, 62, 11, 13, 0, 0, TWO_PI); x.fill();
+      x.fillStyle = eye; x.beginPath(); x.arc(cx + s*15 + s*2, 64, 6, 0, TWO_PI); x.fill();
+      x.fillStyle = '#000'; x.beginPath(); x.arc(cx + s*15 + s*3, 64, 3, 0, TWO_PI); x.fill();
+    }
+    // angry brows
+    x.strokeStyle = '#0a2a0a'; x.lineWidth = 5; x.lineCap = 'round';
+    x.beginPath(); x.moveTo(cx-27, 46); x.lineTo(cx-6, 56); x.moveTo(cx+27, 46); x.lineTo(cx+6, 56); x.stroke();
+    // jagged grin with teeth
+    x.fillStyle = '#160016'; x.beginPath(); x.moveTo(cx-26, 88); x.quadraticCurveTo(cx, 108, cx+26, 88); x.quadraticCurveTo(cx, 96, cx-26, 88); x.fill();
+    x.fillStyle = '#fff';
+    for (let i = -2; i <= 2; i++) { x.beginPath(); x.moveTo(cx + i*10 - 4, 90); x.lineTo(cx + i*10, 98); x.lineTo(cx + i*10 + 4, 90); x.fill(); }
+  } else if (t.shape === 'maw') {
+    // Chomper: mostly a giant vertical mouth full of teeth, tiny eyes, stub arms.
+    const bodyPath = () => { x.beginPath(); x.moveTo(cx-34, 116); x.quadraticCurveTo(cx-46, 40, cx, 26); x.quadraticCurveTo(cx+46, 40, cx+34, 116); x.quadraticCurveTo(cx, 126, cx-34, 116); x.closePath(); };
+    outline(bodyPath);
+    const g = x.createLinearGradient(0, 26, 0, 120); g.addColorStop(0, shadeHex(b1, 1.25)); g.addColorStop(1, b2);
+    x.fillStyle = g; bodyPath(); x.fill();
+    // stub arms
+    x.strokeStyle = shadeHex(b2, 0.9); x.lineWidth = 9; x.lineCap = 'round';
+    x.beginPath(); x.moveTo(cx-30, 78); x.lineTo(cx-44, 96); x.moveTo(cx+30, 78); x.lineTo(cx+44, 96); x.stroke();
+    // gaping maw
+    x.fillStyle = '#2a0008'; x.beginPath(); x.ellipse(cx, 82, 26, 30, 0, 0, TWO_PI); x.fill();
+    x.fillStyle = '#55001a'; x.beginPath(); x.ellipse(cx, 90, 16, 16, 0, 0, TWO_PI); x.fill();
+    // teeth ring
+    x.fillStyle = '#fff';
+    for (let a = 0; a < TWO_PI; a += TWO_PI / 12) {
+      const tx = cx + Math.cos(a) * 24, ty = 82 + Math.sin(a) * 28;
+      const ix = cx + Math.cos(a) * 12, iy = 82 + Math.sin(a) * 14;
+      x.beginPath(); x.moveTo(tx - 4, ty); x.lineTo(ix, iy); x.lineTo(tx + 4, ty); x.fill();
+    }
+    // eyes
+    for (const s of [-1, 1]) { x.fillStyle = '#fff'; x.beginPath(); x.arc(cx + s*16, 48, 7, 0, TWO_PI); x.fill(); x.fillStyle = eye; x.beginPath(); x.arc(cx + s*16, 48, 3.5, 0, TWO_PI); x.fill(); }
+  } else if (t.shape === 'sphere') {
+    // Float-Eye: veined floating eyeball with a big iris and dangling tentacles.
+    // tentacles first (behind)
+    x.strokeStyle = shadeHex(b2, 0.85); x.lineWidth = 6; x.lineCap = 'round';
+    for (let i = -2; i <= 2; i++) { x.beginPath(); x.moveTo(cx + i*12, 96); x.quadraticCurveTo(cx + i*16, 116, cx + i*10, 126); x.stroke(); }
+    const eyePath = () => { x.beginPath(); x.arc(cx, 62, 40, 0, TWO_PI); x.closePath(); };
+    outline(eyePath);
+    const g = x.createRadialGradient(cx-14, 46, 8, cx, 62, 46); g.addColorStop(0, '#ffffff'); g.addColorStop(0.55, shadeHex(b1, 1.2)); g.addColorStop(1, b2);
+    x.fillStyle = g; eyePath(); x.fill();
+    // veins
+    x.strokeStyle = 'rgba(150,0,0,0.5)'; x.lineWidth = 1.5;
+    for (let a = 0; a < TWO_PI; a += TWO_PI / 7) { x.beginPath(); x.moveTo(cx + Math.cos(a)*38, 62 + Math.sin(a)*38); x.quadraticCurveTo(cx + Math.cos(a)*20, 62 + Math.sin(a)*20, cx + Math.cos(a+0.6)*24, 62 + Math.sin(a+0.6)*24); x.stroke(); }
+    // iris + pupil
+    x.fillStyle = eye; x.beginPath(); x.arc(cx, 62, 20, 0, TWO_PI); x.fill();
+    x.fillStyle = shadeHex(eye, 0.6); x.beginPath(); x.arc(cx, 62, 20, 0, TWO_PI); x.lineWidth = 3; x.strokeStyle = shadeHex(eye, 0.5); x.stroke();
+    x.fillStyle = '#000'; x.beginPath(); x.arc(cx, 62, 9, 0, TWO_PI); x.fill();
+    x.fillStyle = 'rgba(255,255,255,0.9)'; x.beginPath(); x.arc(cx-4, 58, 3, 0, TWO_PI); x.fill();
+    // glowing rim
+    x.strokeStyle = `${acc}`; x.globalAlpha = 0.4; x.lineWidth = 3; eyePath(); x.stroke(); x.globalAlpha = 1;
+  } else {
+    // Megabeast: hulking horned humanoid with a glowing core.
+    // horns
+    x.fillStyle = shadeHex(acc, 1.1);
+    x.beginPath(); x.moveTo(cx-20, 26); x.lineTo(cx-30, 4); x.lineTo(cx-12, 22); x.fill();
+    x.beginPath(); x.moveTo(cx+20, 26); x.lineTo(cx+30, 4); x.lineTo(cx+12, 22); x.fill();
+    // head
+    const headPath = () => { x.beginPath(); x.arc(cx, 34, 18, 0, TWO_PI); x.closePath(); };
+    outline(headPath); x.fillStyle = shadeHex(b1, 1.1); headPath(); x.fill();
+    // body/shoulders
+    const bodyPath = () => { x.beginPath(); x.moveTo(cx-40, 122); x.lineTo(cx-44, 64); x.quadraticCurveTo(cx-40, 48, cx-20, 46); x.lineTo(cx+20, 46); x.quadraticCurveTo(cx+40, 48, cx+44, 64); x.lineTo(cx+40, 122); x.quadraticCurveTo(cx, 130, cx-40, 122); x.closePath(); };
+    outline(bodyPath);
+    const g = x.createLinearGradient(cx-44, 0, cx+44, 0); g.addColorStop(0, shadeHex(b1, 1.25)); g.addColorStop(0.5, b1); g.addColorStop(1, b2);
+    x.fillStyle = g; bodyPath(); x.fill();
+    // arms/fists
+    x.strokeStyle = shadeHex(b2, 1.0); x.lineWidth = 16; x.lineCap = 'round';
+    x.beginPath(); x.moveTo(cx-40, 66); x.lineTo(cx-48, 104); x.moveTo(cx+40, 66); x.lineTo(cx+48, 104); x.stroke();
+    // muscle shading
+    x.strokeStyle = 'rgba(0,0,0,0.25)'; x.lineWidth = 3; x.beginPath(); x.moveTo(cx, 52); x.lineTo(cx, 118); x.stroke();
+    // glowing core
+    const cg = x.createRadialGradient(cx, 82, 2, cx, 82, 18); cg.addColorStop(0, '#fff'); cg.addColorStop(0.4, acc); cg.addColorStop(1, 'rgba(0,0,0,0)');
+    x.fillStyle = cg; x.beginPath(); x.arc(cx, 82, 18, 0, TWO_PI); x.fill();
+    // eyes
+    for (const s of [-1, 1]) { x.fillStyle = eye; x.beginPath(); x.ellipse(cx + s*7, 32, 4, 5, 0, 0, TWO_PI); x.fill(); }
+    x.strokeStyle = '#000'; x.lineWidth = 3; x.lineCap = 'round'; x.beginPath(); x.moveTo(cx-13, 26); x.lineTo(cx-3, 31); x.moveTo(cx+13, 26); x.lineTo(cx+3, 31); x.stroke();
+  }
+  return c;
+}
+const ENEMY_SPRITES = {};
+for (const _k in ENEMY_TYPES) ENEMY_SPRITES[_k] = generateEnemySprite(ENEMY_TYPES[_k]);
+const _spriteScratch = document.createElement('canvas');
+_spriteScratch.width = ESW; _spriteScratch.height = ESH;
+const _ssctx = _spriteScratch.getContext('2d');
 
 const WEAPONS = [
   { name: 'PICK GUN', damage: 15, spread: 0.02, ammoType: 'bullets', ammoPerShot: 1, fireRate: 0.3, color: '#777777', barrelColor: '#444444', projectileColor: '#FFFF00', kickForce: 0.6, shakeForce: 0.03, accent: '#FFCC00' },
@@ -1590,12 +1735,11 @@ function render() {
       const enCol = Math.floor(screenX + spriteSize / 2);
       const animBob = Math.sin(enemy.animPhase) * (enemy.state === 'chase' ? 2 : 0.5);
 
-      for (let col = stCol; col < enCol; col++) {
-        if (col < 0 || col >= RW || s.dist >= zBuffer[col]) continue;
-        const lx = (col - stCol) / spriteSize;
-        const lxAbs = Math.abs(lx - 0.5) * 2;
-
-        if (enemy.state === 'dead') {
+      if (enemy.state === 'dead') {
+        // Simple collapse effect on death.
+        for (let col = stCol; col < enCol; col++) {
+          if (col < 0 || col >= RW || s.dist >= zBuffer[col]) continue;
+          const lxAbs = Math.abs((col - stCol) / spriteSize - 0.5) * 2;
           const dp = 1 - enemy.deathTimer / 2.0;
           const collapseH = spriteSize * Math.max(0.1, 1 - dp * 0.9);
           const newY = screenY + spriteSize - collapseH;
@@ -1607,126 +1751,35 @@ function render() {
             ctx.fillStyle = `rgba(80,20,120,${dp * 0.5 * shade})`;
             ctx.fillRect(col, newY + collapseH * 0.3, 1, collapseH * 0.4);
           }
-          continue;
         }
+        continue;
+      }
 
-        const isPain = enemy.painTimer > 0;
-
-        if (enemy.shape === 'sphere') {
-          const dist2center = lxAbs;
-          const circleEdge = Math.sqrt(Math.max(0, 1 - dist2center * dist2center * 1.5));
-          if (circleEdge < 0.2) continue;
-          const bodyShade = shade * (0.7 + circleEdge * 0.3);
-          ctx.fillStyle = isPain ? '#FFFFFF' : shadeColor(enemy.bodyColor1, bodyShade);
-          const bodyH = spriteSize * circleEdge;
-          const bodyY = screenY + (spriteSize - bodyH) / 2 + animBob;
-          ctx.fillRect(col, bodyY, 1, bodyH);
-          if (lx > 0.3 && lx < 0.7) {
-            const eyeY = bodyY + bodyH * 0.2;
-            const eyeH = Math.max(3, bodyH * 0.25);
-            ctx.fillStyle = isPain ? '#FF0000' : '#FFFFFF';
-            ctx.fillRect(col, eyeY, 1, eyeH);
-            if (lx > 0.38 && lx < 0.62) {
-              ctx.fillStyle = isPain ? '#FF0000' : enemy.eyeColor;
-              ctx.fillRect(col, eyeY + 1, 1, eyeH - 2);
-            }
-            if (lx > 0.44 && lx < 0.56) {
-              ctx.fillStyle = '#000';
-              ctx.fillRect(col, eyeY + 2, 1, Math.max(1, eyeH - 4));
-            }
-          }
-          if (dist2center > 0.4 && dist2center < 0.8) {
-            const tentY = bodyY + bodyH * 0.85;
-            const tentH = spriteSize * 0.15 * Math.sin(enemy.animPhase + lx * 5);
-            ctx.fillStyle = shadeColor(enemy.bodyColor2, bodyShade * 0.7);
-            ctx.fillRect(col, tentY, 1, Math.max(1, Math.abs(tentH)));
-          }
-        } else if (enemy.shape === 'blob') {
-          const blobEdge = 1 - lxAbs * lxAbs * 1.8;
-          if (blobEdge < 0.1) continue;
-          const squish = 1 + Math.sin(enemy.animPhase * 2) * 0.08;
-          const bodyH = spriteSize * 0.7 * blobEdge * squish;
-          const bodyY = screenY + spriteSize - bodyH + animBob;
-          const bodyShade = shade * (0.6 + blobEdge * 0.4);
-          ctx.fillStyle = isPain ? '#FFFFFF' : shadeColor(enemy.bodyColor1, bodyShade);
-          ctx.fillRect(col, bodyY, 1, bodyH);
-          ctx.fillStyle = isPain ? '#EEEEEE' : shadeColor(enemy.bodyColor2, bodyShade * 0.85);
-          ctx.fillRect(col, bodyY + bodyH * 0.6, 1, bodyH * 0.4);
-          const highlight = (1 - lxAbs) * 0.2 * shade;
-          ctx.fillStyle = `rgba(255,255,255,${highlight})`;
-          ctx.fillRect(col, bodyY, 1, bodyH * 0.15);
-          if ((lx > 0.3 && lx < 0.42) || (lx > 0.58 && lx < 0.7)) {
-            const eyeY = bodyY + bodyH * 0.15;
-            const eyeH = Math.max(2, bodyH * 0.12);
-            ctx.fillStyle = isPain ? '#FF0000' : enemy.eyeColor;
-            ctx.fillRect(col, eyeY, 1, eyeH);
-            ctx.fillStyle = '#000';
-            ctx.fillRect(col, eyeY + 1, 1, Math.max(1, eyeH - 2));
-          }
-        } else if (enemy.shape === 'maw') {
-          if (lxAbs > 0.7) continue;
-          const bodyH = spriteSize * 0.85;
-          const bodyY = screenY + spriteSize * 0.1 + animBob;
-          const bodyShade = shade * (0.7 + (1 - lxAbs) * 0.3);
-          ctx.fillStyle = isPain ? '#FFFFFF' : shadeColor(enemy.bodyColor1, bodyShade);
-          ctx.fillRect(col, bodyY, 1, bodyH * 0.45);
-          ctx.fillStyle = isPain ? '#EEEEEE' : shadeColor(enemy.bodyColor2, bodyShade * 0.85);
-          ctx.fillRect(col, bodyY + bodyH * 0.45, 1, bodyH * 0.55);
-          if (lxAbs < 0.55) {
-            const mawOpen = 0.15 + Math.abs(Math.sin(enemy.animPhase)) * 0.1;
-            const mawY = bodyY + bodyH * 0.35;
-            const mawH = bodyH * mawOpen;
-            ctx.fillStyle = `rgba(20,0,0,${shade})`;
-            ctx.fillRect(col, mawY, 1, mawH);
-            if (lxAbs > 0.1 && (Math.floor(lx * 10) % 2 === 0)) {
-              ctx.fillStyle = isPain ? '#FFAAAA' : enemy.accentColor;
-              ctx.fillRect(col, mawY, 1, Math.max(1, mawH * 0.3));
-              ctx.fillRect(col, mawY + mawH * 0.7, 1, Math.max(1, mawH * 0.3));
-            }
-          }
-          if ((lx > 0.25 && lx < 0.38) || (lx > 0.62 && lx < 0.75)) {
-            const eyeY = bodyY + bodyH * 0.08;
-            const eyeH = Math.max(2, bodyH * 0.1);
-            ctx.fillStyle = isPain ? '#FF0000' : enemy.eyeColor;
-            ctx.fillRect(col, eyeY, 1, eyeH);
-          }
-          if (lxAbs > 0.4 && lxAbs < 0.65) {
-            const armY = bodyY + bodyH * 0.3;
-            const armH = bodyH * 0.5 + Math.sin(enemy.animPhase + lx * 3) * bodyH * 0.05;
-            ctx.fillStyle = shadeColor(enemy.bodyColor1, bodyShade * 0.8);
-            ctx.fillRect(col, armY, 1, armH);
-          }
-        } else if (enemy.shape === 'hulk') {
-          if (lxAbs > 0.7) continue;
-          const bodyShade = shade * (0.65 + (1 - lxAbs) * 0.35);
-          if (lxAbs < 0.35) {
-            ctx.fillStyle = isPain ? '#FFFFFF' : shadeColor(enemy.bodyColor1, bodyShade);
-            ctx.fillRect(col, screenY + animBob, 1, spriteSize * 0.25);
-            if (lxAbs < 0.25 && lxAbs > 0.08) {
-              ctx.fillStyle = shadeColor(enemy.accentColor, bodyShade);
-              ctx.fillRect(col, screenY - spriteSize * 0.06 + animBob, 1, spriteSize * 0.08);
-            }
-            if ((lx > 0.3 && lx < 0.42) || (lx > 0.58 && lx < 0.7)) {
-              const eyeY = screenY + spriteSize * 0.06 + animBob;
-              const eyeH = Math.max(3, spriteSize * 0.1);
-              ctx.fillStyle = isPain ? '#FF0000' : enemy.eyeColor;
-              ctx.fillRect(col, eyeY, 1, eyeH);
-            }
-          }
-          ctx.fillStyle = isPain ? '#DDDDDD' : shadeColor(enemy.bodyColor1, bodyShade * 0.95);
-          ctx.fillRect(col, screenY + spriteSize * 0.25 + animBob, 1, spriteSize * 0.4);
-          if (lxAbs > 0.3) {
-            ctx.fillStyle = shadeColor(enemy.bodyColor2, bodyShade * 0.85);
-            ctx.fillRect(col, screenY + spriteSize * 0.3 + animBob, 1, spriteSize * 0.45);
-          }
-          ctx.fillStyle = isPain ? '#CCCCCC' : shadeColor(enemy.bodyColor2, bodyShade * 0.75);
-          ctx.fillRect(col, screenY + spriteSize * 0.65 + animBob, 1, spriteSize * 0.35);
-          if (lxAbs < 0.2) {
-            const glow = 0.1 + Math.sin(enemy.animPhase * 2) * 0.08;
-            ctx.fillStyle = `rgba(${hexToRgb(enemy.eyeColor).r},${hexToRgb(enemy.eyeColor).g},${hexToRgb(enemy.eyeColor).b},${glow * shade})`;
-            ctx.fillRect(col, screenY + spriteSize * 0.35 + animBob, 1, spriteSize * 0.15);
-          }
-        }
+      // Alive: blit the pre-rendered detailed monster sprite. Distance shade and
+      // pain flash are applied once to a scratch copy (source-atop => only the
+      // monster's own pixels), then billboarded column-by-column for occlusion.
+      const _sprite = ENEMY_SPRITES[enemy.type] || ENEMY_SPRITES.globkin;
+      _ssctx.globalCompositeOperation = 'source-over';
+      _ssctx.clearRect(0, 0, ESW, ESH);
+      _ssctx.drawImage(_sprite, 0, 0);
+      if (shade < 1) {
+        _ssctx.globalCompositeOperation = 'source-atop';
+        _ssctx.fillStyle = `rgba(0,0,0,${1 - shade})`;
+        _ssctx.fillRect(0, 0, ESW, ESH);
+      }
+      if (enemy.painTimer > 0) {
+        _ssctx.globalCompositeOperation = 'source-atop';
+        _ssctx.fillStyle = 'rgba(255,255,255,0.82)';
+        _ssctx.fillRect(0, 0, ESW, ESH);
+      }
+      _ssctx.globalCompositeOperation = 'source-over';
+      const _drawY = screenY + animBob;
+      for (let col = stCol; col < enCol; col++) {
+        if (col < 0 || col >= RW || s.dist >= zBuffer[col]) continue;
+        const u = (col - stCol) / spriteSize;
+        if (u < 0 || u >= 1) continue;
+        const srcX = Math.min(ESW - 1, (u * ESW) | 0);
+        ctx.drawImage(_spriteScratch, srcX, 0, 1, ESH, col, _drawY, 1, spriteSize);
       }
       continue;
     }
@@ -2074,7 +2127,6 @@ function drawMinimap() {
   ctx.globalAlpha = 1;
 }
 
-const _hexCache = {};
 function hexToRgb(hex) {
   let c = _hexCache[hex];
   if (c) return c;
