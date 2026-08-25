@@ -377,7 +377,7 @@ function buildSurfaceTextures() {
 
 // Perspective-correct textured floor + ceiling (classic raycaster floor casting),
 // with the same distance shading as the walls so everything sits in one space.
-function castFloorCeiling(horizon, fogDist, flicker) {
+function castFloorCeiling(horizon, torchR, ambient, flash, flicker) {
   if (!floorPix) buildSurfaceTextures();
   if (!fcImage || fcImage.width !== RW || fcImage.height !== RH) {
     fcImage = ctx.createImageData(RW, RH);
@@ -391,14 +391,13 @@ function castFloorCeiling(horizon, fogDist, flicker) {
   const S = SURF_SIZE, mask = S - 1;
   const posZ = 0.5 * RH;
   const px = player.x, py = player.y;
-  const shadeSpan = fogDist * 1.5;
   const H = horizon | 0;
   const maxP = (RH >> 1) + 8; // margin so bob/shake horizon offset leaves no stale rows
 
   for (let p = 1; p <= maxP; p++) {
     const rowDist = posZ / p;
-    let shade = (1.0 - rowDist / shadeSpan) * flicker;
-    if (shade < 0.30) shade = 0.30; else if (shade > 1) shade = 1;
+    let shade = ((1 - rowDist / torchR) + flash) * flicker; // torch pool falloff
+    if (shade < ambient) shade = ambient; else if (shade > 1) shade = 1;
     const stepX = rowDist * (rd1x - rd0x) / RW;
     const stepY = rowDist * (rd1y - rd0y) / RW;
     let fx = px + rowDist * rd0x, fy = py + rowDist * rd0y;
@@ -800,6 +799,7 @@ let pickupFlash = 0;
 let weaponBob = 0;
 let weaponKick = 0;
 let muzzleFlash = 0;
+let torchFlash = 0; // DOOM3-style: firing briefly floods the room with light
 let screenShake = 0;
 let stepTimer = 0;
 
@@ -1310,6 +1310,7 @@ function fireWeapon() {
   player.fireTimer = weapon.fireRate;
   weaponKick = weapon.kickForce;
   muzzleFlash = 0.12;
+  torchFlash = 1.0;
   screenShake = weapon.shakeForce;
 
   const soundNames = ['pistol', 'shotgun', 'plasma'];
@@ -1441,6 +1442,8 @@ function update(dt) {
   if (weaponKick < 0.01) weaponKick = 0;
   muzzleFlash -= dt * 3;
   if (muzzleFlash < 0) muzzleFlash = 0;
+  torchFlash -= dt * 3.2;
+  if (torchFlash < 0) torchFlash = 0;
   screenShake *= Math.pow(0.0005, dt);
   damageFlash -= dt * 2.5;
   if (damageFlash < 0) damageFlash = 0;
@@ -1613,8 +1616,15 @@ function render() {
   const ceil = lvl.ceilColor || amb;
   const flr = lvl.floorColor || amb;
 
-  // Perspective-textured floor + ceiling (replaces the old flat gradient fills).
-  castFloorCeiling(halfH + bobY + shakeY, fogDist, flickerIntensity);
+  // DOOM3-style lighting: a tight torch pool around the player fades to near
+  // black, and firing floods the room. Everything shares this so the world
+  // reads as darkness you carve light out of.
+  const TORCH_R = 5.5;
+  const AMBIENT = 0.05;
+  const flashLight = torchFlash * 1.7;
+
+  // Perspective-textured floor + ceiling, lit by the same torch model.
+  castFloorCeiling(halfH + bobY + shakeY, TORCH_R, AMBIENT, flashLight, flickerIntensity);
 
   const numRays = RW;
   const sprites = [];
@@ -1629,7 +1639,7 @@ function render() {
       const lineHeight = Math.floor(RH / perpDist);
       const drawStart = Math.floor(halfH - lineHeight / 2 + bobY + shakeY);
       const colors = WALL_COLORS[result.hit] || WALL_COLORS[1];
-      const shade = Math.max(0.34, (1.0 - perpDist / (fogDist * 1.5))) * flickerIntensity;
+      const shade = Math.min(1, Math.max(AMBIENT, (1 - perpDist / TORCH_R) + flashLight)) * flickerIntensity;
 
       const tex = wallTextures[result.hit];
       if (tex && lineHeight > 4) {
@@ -1679,7 +1689,7 @@ function render() {
     if (Math.abs(angleDiff) > FOV * 0.7) continue;
 
     const screenX = Math.floor(RW / 2 + (angleDiff / FOV) * RW) + shakeX + bobX;
-    const shade = Math.max(0.32, (1.0 - s.dist / (fogDist * 1.5))) * flickerIntensity;
+    const shade = Math.min(1, Math.max(AMBIENT, (1 - s.dist / TORCH_R) + flashLight)) * flickerIntensity;
 
     if (s.type === 'blood') {
       if (s.dist < 0.5 || s.dist > fogDist * 1.5) continue;
@@ -1839,10 +1849,10 @@ function render() {
 
   // Vignette: darken the edges for depth and atmosphere (cached per size).
   if (!vignetteGrad || vignetteGrad._w !== RW || vignetteGrad._h !== RH) {
-    const g = ctx.createRadialGradient(RW / 2, RH / 2, RH * 0.32, RW / 2, RH / 2, RH * 0.9);
+    const g = ctx.createRadialGradient(RW / 2, RH / 2, RH * 0.22, RW / 2, RH / 2, RH * 0.85);
     g.addColorStop(0, 'rgba(0,0,0,0)');
-    g.addColorStop(0.7, 'rgba(0,0,0,0.12)');
-    g.addColorStop(1, 'rgba(8,2,16,0.55)');
+    g.addColorStop(0.55, 'rgba(0,0,0,0.25)');
+    g.addColorStop(1, 'rgba(0,0,0,0.82)');
     g._w = RW; g._h = RH;
     vignetteGrad = g;
   }
